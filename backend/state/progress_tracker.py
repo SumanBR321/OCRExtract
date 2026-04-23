@@ -26,6 +26,7 @@ class ProgressTracker:
     def __init__(self) -> None:
         self._lock  = threading.Lock()
         self._state = ProcessingStatus()
+        self._stop_event = threading.Event()
 
     # ------------------------------------------------------------------
     # Write helpers
@@ -81,6 +82,15 @@ class ProgressTracker:
         """Reset to initial state (called before each new run)."""
         with self._lock:
             self._state = ProcessingStatus()
+            self._stop_event.clear()
+
+    def stop(self) -> None:
+        """Signals the background thread to stop."""
+        self._stop_event.set()
+        self.log("🛑 Stop signal received. Finishing current file...")
+
+    def is_stopped(self) -> bool:
+        return self._stop_event.is_set()
 
     # ------------------------------------------------------------------
     # Read helpers

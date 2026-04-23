@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import traceback
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -89,8 +90,7 @@ async def get_status():
 @app.post("/start", summary="Start the OCR pipeline")
 async def start_pipeline(background_tasks: BackgroundTasks):
     """
-    Begins the full pipeline asynchronously:
-      Drive traversal → download → OCR → extract → clean → validate → Excel
+    Begins the full pipeline asynchronously.
     """
     if tracker.is_running():
         raise HTTPException(status_code=409, detail="Pipeline is already running.")
@@ -103,7 +103,14 @@ async def start_pipeline(background_tasks: BackgroundTasks):
 
     tracker.reset()
     background_tasks.add_task(_run_pipeline)
-    return {"message": "Pipeline started. Poll /status for progress."}
+    return {"message": "Pipeline started."}
+
+
+@app.post("/stop", summary="Stop the OCR pipeline")
+async def stop_pipeline():
+    """Signals the running pipeline to stop safely."""
+    tracker.stop()
+    return {"message": "Stop signal sent to pipeline."}
 
 
 @app.get("/download", summary="Download the generated Excel file")
@@ -146,6 +153,17 @@ def _run_pipeline() -> None:
         pdf_files = list(drive.iter_pdfs(settings.drive_root_folder_id))
         total = len(pdf_files)
 
+        # Load checkpoints
+        checkpoint_path = Path("output/processed_files.json")
+        processed_set = set()
+        if checkpoint_path.exists():
+            try:
+                import json
+                with open(checkpoint_path, "r") as f:
+                    processed_set = set(json.load(f))
+                tracker.log(f"🔄 Resuming: skipping {len(processed_set)} already processed files.")
+            except: pass
+
         if total == 0:
             tracker.log("⚠️  No PDF files found in the specified Drive folder.")
             tracker.complete()
@@ -159,6 +177,15 @@ def _run_pipeline() -> None:
 
         # ── 2. Process each PDF ─────────────────────────────────────────────
         for drive_file in pdf_files:
+            if tracker.is_stopped():
+                tracker.log("🛑 Pipeline stopped by user.")
+                break
+            
+            # Skip if already done
+            if drive_file.name in processed_set:
+                tracker.file_done()
+                continue
+
             try:
                 tracker.set_current_file(drive_file.name)
                 tracker.log(f"📄 Processing: {drive_file.name}")
@@ -176,11 +203,11 @@ def _run_pipeline() -> None:
                 processed = [preprocess_image(img) for img in images]
 
                 # OCR
-                tracker.log(f"  🔍 Running OCR…")
+                tracker.log(f"  🔍 Running OCR (8 cores)…")
                 raw_text = run_ocr_on_images(processed, tesseract_cmd=settings.tesseract_cmd)
 
                 # Extract
-                tracker.log(f"  📊 Extracting structured data…")
+                tracker.log(f"  📊 Extracting structured data (AI active)…")
                 records = extract_records(
                     raw_text,
                     source_file=drive_file.name,
@@ -203,12 +230,23 @@ def _run_pipeline() -> None:
                     f"{len(invalid)} flagged."
                 )
 
+                # Mark as done in checkpoint
+                processed_set.add(drive_file.name)
+                with open(checkpoint_path, "w") as f:
+                    import json
+                    json.dump(list(processed_set), f)
+
             except Exception as exc:
                 msg = f"{drive_file.name}: {exc}"
                 tracker.add_error(msg)
                 logger.error("Error processing %s:\n%s", drive_file.name, traceback.format_exc())
             finally:
                 tracker.file_done()
+
+                # Incremental Save after EVERY file
+                if all_valid or all_invalid:
+                    _excel_output_path = write_excel(all_valid, all_invalid)
+                    tracker.log(f"🔄 Excel updated: {len(all_valid)} valid rows total.")
 
         # ── 3. Write Excel ───────────────────────────────────────────────────
         tracker.log("📝 Writing Excel file…")

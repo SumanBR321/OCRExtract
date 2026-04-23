@@ -14,7 +14,9 @@ import re
 from typing import List
 
 from rapidfuzz import process as fuzz_process
+from groq import Groq
 
+from backend.config import settings
 from backend.models.schema import QuestionPaperRecord, ConfidenceLevel, MONTH_ORDER
 from backend.utils.logger import get_logger
 
@@ -41,15 +43,21 @@ RE_MONTH = re.compile(
     re.IGNORECASE,
 )
 
-# Semester: Roman numerals I–VIII optionally preceded by SEM/SEMESTER
+# Semester: Roman (I-VIII) or Digits (1-8), optionally with SEM/SEMESTER
 RE_SEMESTER = re.compile(
-    r"\bSEM(?:ESTER)?\s*[:\-]?\s*(I{1,3}|IV|V?I{0,3}|VII|VIII)\b",
+    r"(?:SEM(?:ESTER)?|SESSION)\s*[:\-]?\s*([IVX]{1,5}|[1-8](?:ST|ND|RD|TH)?)\b",
     re.IGNORECASE,
 )
 
-# Course title: line after "Subject:" / "Course:" / "Paper:"
+# Alternative: "Third Semester", "Fourth Sem"
+RE_SEMESTER_WORDS = re.compile(
+    r"\b(FIRST|SECOND|THIRD|FOURTH|FIFTH|SIXTH|SEVENTH|EIGHTH)\s+SEM(?:ESTER)?\b",
+    re.IGNORECASE,
+)
+
+# Course title: common labels
 RE_COURSE_TITLE = re.compile(
-    r"(?:Subject|Course|Paper)\s*[:\-]\s*(.+)",
+    r"(?:Subject|Course|Paper|Title|Branch)\s*[:\-]\s*(.+)",
     re.IGNORECASE,
 )
 
@@ -138,9 +146,11 @@ def _extract_one(
         flags.append("missing_course_code")
         confidence = ConfidenceLevel.LOW
 
-    # -- Year --
-    year_matches = RE_YEAR.findall(text)
+    # -- Year (Only look in the top 1000 characters - the header) --
+    header_text = text[:1000]
+    year_matches = RE_YEAR.findall(header_text)
     year = int(year_matches[0]) if year_matches else None
+    
     if not year:
         flags.append("missing_year")
         confidence = ConfidenceLevel.LOW
@@ -154,17 +164,29 @@ def _extract_one(
 
     # -- Semester --
     sem_match = RE_SEMESTER.search(text)
-    semester = sem_match.group(1).upper() if sem_match else hint_semester or None
+    if not sem_match:
+        sem_match = RE_SEMESTER_WORDS.search(text)
+    
+    semester = sem_match.group(1).upper() if sem_match else None
+    
+    # Fallback to hint or filename for semester
+    if not semester:
+        semester = hint_semester or _parse_sem_from_filename(source_file)
+    
     if not semester:
         flags.append("missing_semester")
 
     # -- Course Title --
     title_match = RE_COURSE_TITLE.search(text)
     course_title = _clean_title(title_match.group(1)) if title_match else None
+    
+    # Heuristic fallback for Title: look for prominent lines before split keywords
+    if not course_title:
+        course_title = _heuristic_title_search(text)
 
-    # -- LLM fallback placeholder --
-    if flags and any(f in flags for f in ("missing_course_code", "missing_year")):
-        llm_data = _llm_fallback(text)  # returns {} until wired up
+    # -- LLM fallback if any major fields are missing --
+    if not (course_code and course_title and year and semester):
+        llm_data = _llm_fallback(text)
         if llm_data:
             course_code  = course_code  or llm_data.get("course_code")
             course_title = course_title or llm_data.get("course_title")
@@ -223,8 +245,49 @@ def _normalise_code(raw: str) -> str:
 
 
 def _clean_title(raw: str) -> str:
-    """Strip trailing punctuation / extra whitespace from a title."""
-    return re.sub(r"[\s,;.:]+$", "", raw.strip())
+    """Strip trailing punctuation / extra whitespace / OCR noise from a title."""
+    # Remove leading/trailing non-alphanumeric junk
+    cleaned = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9)]+$", "", raw.strip())
+    # If the title is just a code, ignore it
+    if RE_COURSE_CODE.fullmatch(cleaned):
+        return None
+    return cleaned if len(cleaned) > 2 else None
+
+
+def _parse_sem_from_filename(filename: str) -> str | None:
+    """Extract semester hint from filename like 'SOB-VI-SEM-...'"""
+    m = re.search(r"-([IVX]{1,5}|[1-8])-SEM", filename, re.IGNORECASE)
+    return m.group(1).upper() if m else None
+
+
+def _heuristic_title_search(text: str) -> str | None:
+    """
+    Look for a line that looks like a course title.
+    Usually it's between the Examination line and the Time line.
+    """
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    
+    # Find the boundary: Time/Marks/Duration
+    boundary_idx = -1
+    for i, line in enumerate(lines):
+        if _SPLIT_KEYWORDS.search(line):
+            boundary_idx = i
+            break
+    
+    if boundary_idx > 0:
+        # Search backwards from the boundary for a prominent line (all caps or distinct)
+        # Skip lines that look like Degree or Semester or Date
+        for i in range(boundary_idx - 1, -1, -1):
+            line = lines[i]
+            # Ignore if it's too short, just a code, or contains "Examination"
+            if len(line) < 5: continue
+            if "EXAMINATION" in line.upper(): continue
+            if "SEMESTER" in line.upper(): continue
+            if RE_COURSE_CODE.search(line): continue
+            
+            return _clean_title(line)
+            
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -233,20 +296,32 @@ def _clean_title(raw: str) -> str:
 
 def _llm_fallback(text: str) -> dict:
     """
-    Placeholder for an LLM-based extraction fallback.
-
-    To activate: call your preferred LLM API here, passing `text` as
-    context and asking it to return a JSON object with keys:
-        course_code, course_title, year, month, semester
-
-    Returns an empty dict until wired up.
+    Call Groq API to extract structured data from OCR text.
     """
-    # Example (OpenAI):
-    # import openai
-    # response = openai.chat.completions.create(
-    #     model="gpt-4o-mini",
-    #     messages=[{"role": "user", "content": PROMPT_TEMPLATE.format(text=text[:3000])}],
-    #     response_format={"type": "json_object"},
-    # )
-    # return json.loads(response.choices[0].message.content)
-    return {}
+    if not settings.groq_api_key:
+        return {}
+
+    try:
+        client = Groq(api_key=settings.groq_api_key)
+        
+        prompt = f"""
+        Extract exam paper metadata from the following OCR text.
+        Return ONLY a JSON object with these keys: 
+        "course_code", "course_title", "year" (int), "month", "semester" (e.g. "III" or "3rd").
+        
+        Text:
+        {text[:4000]}
+        """
+        
+        completion = client.chat.completions.create(
+            model=settings.groq_model,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            temperature=0.1,
+        )
+        
+        import json
+        return json.loads(completion.choices[0].message.content)
+    except Exception as e:
+        logger.error(f"Groq extraction failed: {str(e)}")
+        return {}

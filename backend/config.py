@@ -29,10 +29,16 @@ class Settings(BaseSettings):
     google_credentials_path: str = "credentials/service_account.json"
     drive_root_folder_id:    str = ""          # REQUIRED — set in .env
 
-    # ── Tesseract ───────────────────────────────────────────────────────────
-    # Windows example: "C:/Program Files/Tesseract-OCR/tesseract.exe"
-    # Leave empty on Linux/macOS if tesseract is on PATH
+    # ── Tesseract & Poppler ───────────────────────────────────────────────
+    # Windows examples: 
+    # TESSERACT_CMD: "C:/Program Files/Tesseract-OCR/tesseract.exe"
+    # POPPLER_PATH:  "C:/poppler/Library/bin"
     tesseract_cmd: Optional[str] = None
+    poppler_path:  Optional[str] = None
+
+    # ── Groq ────────────────────────────────────────────────────────────────
+    groq_api_key: Optional[str] = None
+    groq_model:   str = "llama-3.1-8b-instant"
 
     # ── Processing ──────────────────────────────────────────────────────────
     pdf_dpi:         int  = 300

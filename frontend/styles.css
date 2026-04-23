@@ -159,6 +159,26 @@ header {
   box-shadow: none;
 }
 
+/* ── Stop Button ─────────────────────────────────────────────────── */
+#btn-stop {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 24px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-md);
+  background: rgba(239,68,68,.1);
+  color: var(--danger);
+  font-family: var(--font-sans);
+  font-size: .9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition), transform var(--transition);
+}
+#btn-stop:hover:not(:disabled) { background: rgba(239,68,68,.2); transform: translateY(-1px); }
+#btn-stop:disabled { opacity: .5; cursor: not-allowed; }
+#btn-stop.visible { display: inline-flex; }
+
 /* ── Download Button ─────────────────────────────────────────────── */
 #btn-download {
   display: none;

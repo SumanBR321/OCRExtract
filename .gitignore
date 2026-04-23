@@ -1,15 +1,37 @@
+# ── Environment & Private ──────────────────────────────────────
 .env
+credentials/
+*.json
+!backend/drive/credentials_template.json # Keep templates if any
+
+# ── Processing & Output ────────────────────────────────────────
 downloads/
 output/
 logs/
+temp/
+tmp/
+*.pdf
+*.xlsx
+*.csv
+*.log
+
+# ── Python ─────────────────────────────────────────────────────
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
 .pytest_cache/
 *.egg-info/
 dist/
 build/
 .venv/
 venv/
-credentials/
-*.xlsx
+env/
+
+# ── IDEs & System ──────────────────────────────────────────────
+.vscode/
+.idea/
+.project
+.settings/
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -35,7 +35,7 @@ logger = get_logger("excel_writer")
 # Constants
 # ---------------------------------------------------------------------------
 
-COLUMNS = ["School", "SEM", "Degree", "Course Code", "Course Title", "Month", "Year"]
+COLUMNS = ["School", "SEM", "Degree", "Course Code", "Course Title", "Month", "Year", "Source File"]
 
 HEADER_FILL  = "1E3A5F"   # dark navy
 HEADER_FONT  = "FFFFFF"   # white

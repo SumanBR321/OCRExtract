@@ -10,6 +10,7 @@ from typing import List
 
 from PIL import Image
 
+from backend.config import settings
 from backend.utils.logger import get_logger
 
 logger = get_logger("pdf_to_image")
@@ -62,6 +63,7 @@ def pdf_to_images(pdf_path: str | Path, dpi: int = DEFAULT_DPI) -> List[Image.Im
             thread_count=2,          # parallel page rendering
             use_cropbox=True,
             strict=False,            # tolerate slightly malformed PDFs
+            poppler_path=settings.poppler_path,
         )
     except PDFInfoNotInstalledError as exc:
         raise RuntimeError(

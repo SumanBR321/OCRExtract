@@ -17,6 +17,7 @@ const POLL_INTERVAL = 2000;   // ms
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 const $start        = document.getElementById('btn-start');
+const $stop         = document.getElementById('btn-stop');
 const $download     = document.getElementById('btn-download');
 const $clearLogs    = document.getElementById('btn-clear-logs');
 const $statusDot    = document.getElementById('status-dot');
@@ -56,6 +57,20 @@ function fmtElapsed(secs) {
 function nowTime() {
   const d = new Date();
   return d.toTimeString().slice(0, 8);
+}
+async function handleStop() {
+    appendLog('⏹ Sending stop request to backend...', nowTime());
+    try {
+        const response = await fetch(`${API_BASE}/stop`, { method: 'POST' });
+        if (response.ok) {
+            $stop.disabled = true;
+            appendLog('ℹ️ Stop signal received by backend.', nowTime());
+        } else {
+            appendLog('❌ Failed to send stop signal.', nowTime());
+        }
+    } catch (err) {
+        appendLog('❌ Error connecting to backend for stop.', nowTime());
+    }
 }
 
 /** Classify a log message for colour coding */
@@ -146,6 +161,13 @@ function applyStatus(data) {
   isComplete = data.is_complete;
 
   $start.disabled = isRunning;
+
+  if (isRunning) {
+      $stop.classList.add('visible');
+      $stop.disabled = false;
+  } else {
+      $stop.classList.remove('visible');
+  }
 
   if (isComplete && !wasRunning && elapsedTimer) {
     // Stop elapsed timer when done
@@ -253,6 +275,7 @@ function handleClearLogs() {
 
 // ── Event listeners ───────────────────────────────────────────────────────────
 $start.addEventListener('click',     handleStart);
+$stop.addEventListener('click',      handleStop);
 $download.addEventListener('click',  handleDownload);
 $clearLogs.addEventListener('click', handleClearLogs);
 

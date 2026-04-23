@@ -98,6 +98,7 @@ class QuestionPaperRecord(BaseModel):
             "Course Title": self.course_title or "",
             "Month":        self.month        or "",
             "Year":         self.year         or "",
+            "Source File":  self.source_file  or "",
         }
 
 
