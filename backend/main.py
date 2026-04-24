@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.config import settings
 from backend.drive.drive_client import DriveClient
-from backend.models.schema import ProcessingStatus
+from backend.models.schema import ProcessingStatus, QuestionPaperRecord
 from backend.processing.cleaner import clean_record
 from backend.processing.extractor import extract_records
 from backend.processing.ocr_engine import run_ocr_on_images
@@ -173,15 +173,36 @@ def _run_pipeline() -> None:
             except: pass
 
         # Load existing records to resume building the Excel
+        import pandas as pd
         if backup_path.exists():
             try:
                 with open(backup_path, "r") as f:
                     data = json.load(f)
                     all_valid   = [QuestionPaperRecord(**r) for r in data.get("valid", [])]
                     all_invalid = [QuestionPaperRecord(**r) for r in data.get("invalid", [])]
-                tracker.log(f"🔄 Resumed: {len(processed_set)} files already done, {len(all_valid)} rows reloaded.")
+                tracker.log(f"🔄 Resumed: {len(processed_set)} files done, {len(all_valid)} rows reloaded from backup.")
             except Exception as e:
                 logger.error(f"Failed to load backup: {e}")
+
+        # SAFETY: If backup is empty but Excel exists, try to reload from Excel
+        if not all_valid and final_excel_path.exists():
+            try:
+                tracker.log("📂 Backup empty. Attempting to reload from Excel file…")
+                # Read valid sheet
+                df = pd.read_excel(final_excel_path, sheet_name="Valid Records")
+                for _, row in df.iterrows():
+                    # Map Excel columns back to schema
+                    all_valid.append(QuestionPaperRecord(
+                        course_code=str(row.get("Course Code", "")),
+                        course_title=str(row.get("Course Title", "")),
+                        year=int(row["Year"]) if pd.notnull(row.get("Year")) else None,
+                        month=str(row.get("Month", "")),
+                        semester=str(row.get("Semester", "")),
+                        source_file=str(row.get("Source File", "")),
+                    ))
+                tracker.log(f"✅ Recovered {len(all_valid)} rows from Excel.")
+            except Exception as e:
+                logger.warning(f"Excel recovery skipped: {e}")
 
         if total == 0:
             tracker.log("⚠️  No PDF files found in the specified Drive folder.")
@@ -191,39 +212,43 @@ def _run_pipeline() -> None:
         tracker.start(total)
         tracker.log(f"✅ Found {total} PDF file(s).")
 
-        # ── 2. Process each PDF ─────────────────────────────────────────────
-        for drive_file in pdf_files:
+        # ── 2. Process PDFs Concurrently ───────────────────────────────────
+        # We use a ThreadPoolExecutor to handle multiple files at once.
+        # Max 3 concurrent files to avoid VRAM congestion on the RTX 3050.
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        
+        results_lock = threading.Lock()
+
+        def _process_single_pdf(drive_file):
             if tracker.is_stopped():
-                tracker.log("🛑 Pipeline stopped by user.")
-                break
-            
+                return
+
             # Skip if already done
             if drive_file.name in processed_set:
                 tracker.file_done()
-                continue
+                return
 
             try:
-                tracker.set_current_file(drive_file.name)
-                tracker.log(f"📄 Processing: {drive_file.name}")
+                tracker.log(f"📄 Start: {drive_file.name}")
 
-                # Download
-                tracker.log(f"  ⬇️  Downloading…")
-                local_path = drive.download(drive_file)
+                # Download (Fresh client per thread for safety)
+                thread_drive = DriveClient(
+                    credentials_path=settings.credentials_path,
+                    download_dir=settings.downloads_path,
+                )
+                local_path = thread_drive.download(drive_file)
 
                 # PDF → images
-                tracker.log(f"  🖼️  Converting PDF to images @ {settings.pdf_dpi} DPI…")
                 images = pdf_to_images(local_path, dpi=settings.pdf_dpi)
 
-                # Preprocess
-                tracker.log(f"  🔧 Preprocessing {len(images)} page(s)…")
+                # Preprocess (now GPU-accelerated internally)
                 processed = [preprocess_image(img) for img in images]
 
-                # OCR
-                tracker.log(f"  🔍 Running OCR (8 cores)…")
+                # OCR (uses GPU)
                 raw_text = run_ocr_on_images(processed, tesseract_cmd=settings.tesseract_cmd)
 
-                # Extract
-                tracker.log(f"  📊 Extracting structured data (AI active)…")
+                # Extract (now parallelized internally)
                 records = extract_records(
                     raw_text,
                     source_file=drive_file.name,
@@ -234,31 +259,33 @@ def _run_pipeline() -> None:
                     hint_year=drive_file.year,
                 )
 
-                # Clean
+                # Clean & Validate
                 cleaned = [clean_record(r) for r in records]
-
-                # Validate
                 valid, invalid = validate_records(cleaned)
-                all_valid.extend(valid)
-                all_invalid.extend(invalid)
+
+                # Thread-safe update of shared results
+                with results_lock:
+                    all_valid.extend(valid)
+                    all_invalid.extend(invalid)
+                    processed_set.add(drive_file.name)
+                    
+                    # Persist checkpoints
+                    with open(checkpoint_path, "w") as f:
+                        json.dump(list(processed_set), f)
+                    with open(backup_path, "w") as f:
+                        json.dump({
+                            "valid":   [r.model_dump() for r in all_valid],
+                            "invalid": [r.model_dump() for r in all_invalid]
+                        }, f)
+                    
+                    # Incremental Save
+                    write_excel(all_valid, all_invalid, output_path=final_excel_path)
+                    global _excel_output_path
+                    _excel_output_path = final_excel_path
 
                 tracker.add_rows(len(valid))
-                tracker.add_records(valid) # Push to UI preview
-                tracker.log(
-                    f"  ✅ Extracted {len(valid)} valid row(s), "
-                    f"{len(invalid)} flagged."
-                )
-
-                # Mark as done and Save Backup
-                processed_set.add(drive_file.name)
-                with open(checkpoint_path, "w") as f:
-                    json.dump(list(processed_set), f)
-                
-                with open(backup_path, "w") as f:
-                    json.dump({
-                        "valid":   [r.model_dump() for r in all_valid],
-                        "invalid": [r.model_dump() for r in all_invalid]
-                    }, f)
+                tracker.add_records(valid)
+                tracker.log(f"✅ Done: {drive_file.name} ({len(valid)} rows)")
 
             except Exception as exc:
                 msg = f"{drive_file.name}: {exc}"
@@ -267,13 +294,11 @@ def _run_pipeline() -> None:
             finally:
                 tracker.file_done()
 
-                # Incremental Save to the FIXED filename
-                if all_valid or all_invalid:
-                    write_excel(all_valid, all_invalid, output_path=final_excel_path)
-                    global _excel_output_path
-                    _excel_output_path = final_excel_path
-                    tracker.set_excel_url("/download")
-                    tracker.log(f"🔄 Excel updated: {len(all_valid)} rows total.")
+        # Run concurrent workers
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            list(executor.map(_process_single_pdf, pdf_files))
+
+        tracker.set_excel_url("/download")
 
         # ── 3. Write Excel ───────────────────────────────────────────────────
         tracker.log("📝 Writing Excel file…")

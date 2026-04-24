@@ -168,8 +168,20 @@ def _normalise_month(month: Optional[str]) -> Optional[str]:
 def _clean_semester(sem: Optional[str]) -> Optional[str]:
     if not sem:
         return sem
-    # Strip whitespace, uppercase Roman numerals
+    # Strip whitespace, uppercase
     sem = sem.strip().upper()
-    # Remove non-Roman-numeral characters
-    sem = re.sub(r"[^IVX]", "", sem)
+    
+    # Common words → Roman
+    word_map = {
+        "FIRST": "I", "SECOND": "II", "THIRD": "III", "FOURTH": "IV",
+        "FIFTH": "V", "SIXTH": "VI", "SEVENTH": "VII", "EIGHTH": "VIII"
+    }
+    if sem in word_map:
+        return word_map[sem]
+    
+    # Remove "SEM" or "SEMESTER" if it's still there
+    sem = re.sub(r"SEM(?:ESTER)?", "", sem).strip()
+    
+    # Only keep Roman numerals, Digits, and ordinal suffixes
+    sem = re.sub(r"[^IVX0-9]", "", sem)
     return sem or None

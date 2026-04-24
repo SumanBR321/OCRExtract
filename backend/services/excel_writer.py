@@ -44,6 +44,8 @@ ALT_ROW_FILL = "EAF0FB"   # light blue-grey for alternating rows
 SEMESTER_ORDER = {
     "I": 1, "II": 2, "III": 3, "IV": 4,
     "V": 5, "VI": 6, "VII": 7, "VIII": 8,
+    "1": 1, "2": 2, "3": 3, "4": 4,
+    "5": 5, "6": 6, "7": 7, "8": 8,
 }
 
 

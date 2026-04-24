@@ -163,29 +163,36 @@ class DriveClient:
 
                 elif mime == "application/pdf" or name.lower().endswith(".pdf"):
                     # Attempt to parse metadata from filename
-                    # Format: SOB-III-SEM-DEC-2022-BBA.pdf
+                    # Common formats:
+                    # SOB-III SEM-DEC-2025-MBA.pdf
+                    # SOB-II-SEM-JUN-2025-MBA.pdf
                     f_school, f_sem, f_month, f_year, f_degree = school, semester, "", "", degree
                     
-                    # Split by dash and remove .pdf
-                    parts = name.rsplit(".", 1)[0].split("-")
-                    if len(parts) >= 5:
-                        # Try to match the pattern: SCHOOL-SEM-SEM-MONTH-YEAR-DEGREE
-                        # Example: SOB-III-SEM-DEC-2022-BBA.pdf (6 parts)
-                        # Example: SOB-III-SEM-DEC-2022.pdf (5 parts)
-                        f_school = parts[0]
-                        f_sem    = parts[1]
-                        # parts[2] is usually "SEM"
-                        f_month  = parts[3]
-                        f_year   = parts[4]
-                        if len(parts) >= 6:
-                            f_degree = parts[5]
+                    # More robust parsing: look for Year (4 digits) and Month (3+ letters)
+                    import re
+                    year_match = re.search(r"\b(20\d{2})\b", name)
+                    if year_match:
+                        f_year = year_match.group(1)
+                    
+                    # Look for semester (Roman or digit + SEM)
+                    sem_match = re.search(r"\b([IVX]{1,5}|\d+)\s*[- ]*SEM", name, re.IGNORECASE)
+                    if sem_match:
+                        f_sem = sem_match.group(1)
+                    
+                    # Look for month (3 letters) - exclude common non-month abbreviations like SEM, SOB, MBA
+                    month_candidates = re.findall(r"\b([A-Z]{3,})\b", name.upper())
+                    known_months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+                    for cand in month_candidates:
+                        if cand in known_months:
+                            f_month = cand
+                            break
 
                     yield DriveFile(
                         file_id=fid,
                         name=name,
-                        school=f_school,
-                        degree=f_degree,
-                        semester=f_sem,
+                        school=f_school or school,
+                        degree=f_degree or degree,
+                        semester=f_sem or semester,
                         month=f_month,
                         year=f_year,
                     )
@@ -203,15 +210,28 @@ class DriveClient:
             drive_file.local_path = local_path
             return local_path
 
-        logger.info("Downloading: %s", drive_file.name)
-        request = self._service.files().get_media(fileId=drive_file.file_id)
-        buf = io.BytesIO()
-        downloader = MediaIoBaseDownload(buf, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
+        import time
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                logger.info("Downloading: %s (attempt %d/%d)", drive_file.name, attempt + 1, max_retries)
+                request = self._service.files().get_media(fileId=drive_file.file_id)
+                buf = io.BytesIO()
+                downloader = MediaIoBaseDownload(buf, request)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
 
-        local_path.write_bytes(buf.getvalue())
-        drive_file.local_path = local_path
-        logger.info("Saved: %s (%d bytes)", local_path.name, local_path.stat().st_size)
-        return local_path
+                local_path.write_bytes(buf.getvalue())
+                drive_file.local_path = local_path
+                logger.info("Saved: %s (%d bytes)", local_path.name, local_path.stat().st_size)
+                return local_path
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error("Failed to download %s after %d attempts: %s", drive_file.name, max_retries, e)
+                    raise
+                logger.warning("Download attempt %d failed for %s: %s. Retrying...", attempt + 1, drive_file.name, e)
+                time.sleep(2 * (attempt + 1))
+        
+        return local_path # Should not reach here if max_retries > 0

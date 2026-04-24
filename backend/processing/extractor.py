@@ -86,18 +86,17 @@ def extract_records(
 ) -> List[QuestionPaperRecord]:
     """
     Parse *raw_text* (combined OCR output) into one or more records.
-
-    Hints come from the Drive folder hierarchy and are used as fallbacks
-    when regex cannot find the values in the text itself.
     """
     # Split into per-paper sections first
     sections = _split_into_sections(raw_text)
     logger.debug("Split into %d section(s) for '%s'.", len(sections), source_file)
 
-    records: List[QuestionPaperRecord] = []
-    for section in sections:
+    # Parallelize extraction if multiple sections exist
+    from concurrent.futures import ThreadPoolExecutor
+    
+    def _safe_extract(section):
         try:
-            record = _extract_one(
+            return _extract_one(
                 section,
                 source_file=source_file,
                 hint_school=hint_school,
@@ -106,16 +105,17 @@ def extract_records(
                 hint_month=hint_month,
                 hint_year=hint_year,
             )
-            records.append(record)
         except Exception as exc:
             logger.warning(f"Failed to extract record from section in {source_file}: {exc}")
-            # Add a dummy record with flags so we don't lose the data
-            records.append(QuestionPaperRecord(
+            return QuestionPaperRecord(
                 source_file=source_file,
                 school=hint_school,
                 degree=hint_degree,
                 flags=["extraction_error", str(exc)]
-            ))
+            )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        records = list(executor.map(_safe_extract, sections))
 
     return records
 
@@ -218,7 +218,12 @@ def _extract_one(
         if llm_data:
             course_code  = course_code  or llm_data.get("course_code")
             course_title = course_title or llm_data.get("course_title")
-            year         = year         or llm_data.get("year")
+            
+            # Sanitize year from LLM
+            llm_year = llm_data.get("year")
+            if llm_year and str(llm_year).isdigit():
+                year = year or int(llm_year)
+            
             month        = month        or llm_data.get("month")
             semester     = semester     or llm_data.get("semester")
             flags.append("llm_assisted")
