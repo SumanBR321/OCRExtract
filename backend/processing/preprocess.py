@@ -87,6 +87,10 @@ def _preprocess_gpu(pil_image: Image.Image) -> Image.Image:
     
     # 7. Back to PIL (The only Device-to-Host transfer)
     res_np = (binary_t.squeeze().cpu().numpy() * 255).astype(np.uint8)
+    
+    del img_t, gray_t, local_mean, binary_t
+    torch.cuda.empty_cache()
+    
     return Image.fromarray(res_np)
 
 

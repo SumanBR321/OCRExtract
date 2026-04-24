@@ -188,18 +188,21 @@ def _run_pipeline() -> None:
         if not all_valid and final_excel_path.exists():
             try:
                 tracker.log("📂 Backup empty. Attempting to reload from Excel file…")
-                # Read valid sheet
-                df = pd.read_excel(final_excel_path, sheet_name="Valid Records")
-                for _, row in df.iterrows():
-                    # Map Excel columns back to schema
-                    all_valid.append(QuestionPaperRecord(
-                        course_code=str(row.get("Course Code", "")),
-                        course_title=str(row.get("Course Title", "")),
-                        year=int(row["Year"]) if pd.notnull(row.get("Year")) else None,
-                        month=str(row.get("Month", "")),
-                        semester=str(row.get("Semester", "")),
-                        source_file=str(row.get("Source File", "")),
-                    ))
+                # Read all sheets
+                all_sheets = pd.read_excel(final_excel_path, sheet_name=None)
+                for sheet_name, df in all_sheets.items():
+                    if sheet_name == "_Flagged": continue
+                    for _, row in df.iterrows():
+                        # Map Excel columns back to schema
+                        all_valid.append(QuestionPaperRecord(
+                            school=str(row.get("School", "")),
+                            course_code=str(row.get("Course Code", "")),
+                            course_title=str(row.get("Course Title", "")),
+                            year=int(row["Year"]) if pd.notnull(row.get("Year")) else None,
+                            month=str(row.get("Month", "")),
+                            semester=str(row.get("SEM", "")),
+                            source_file=str(row.get("Source File", "")),
+                        ))
                 tracker.log(f"✅ Recovered {len(all_valid)} rows from Excel.")
             except Exception as e:
                 logger.warning(f"Excel recovery skipped: {e}")
@@ -219,6 +222,7 @@ def _run_pipeline() -> None:
         import threading
         
         results_lock = threading.Lock()
+        gpu_lock = threading.Lock()
 
         def _process_single_pdf(drive_file):
             if tracker.is_stopped():
@@ -242,11 +246,13 @@ def _run_pipeline() -> None:
                 # PDF → images
                 images = pdf_to_images(local_path, dpi=settings.pdf_dpi)
 
-                # Preprocess (now GPU-accelerated internally)
-                processed = [preprocess_image(img) for img in images]
+                # GPU operations (Preprocess & OCR) are locked to prevent VRAM OOM
+                with gpu_lock:
+                    # Preprocess (now GPU-accelerated internally)
+                    processed = [preprocess_image(img) for img in images]
 
-                # OCR (uses GPU)
-                raw_text = run_ocr_on_images(processed, tesseract_cmd=settings.tesseract_cmd)
+                    # OCR (uses GPU)
+                    raw_text = run_ocr_on_images(processed, tesseract_cmd=settings.tesseract_cmd)
 
                 # Extract (now parallelized internally)
                 records = extract_records(
@@ -278,8 +284,8 @@ def _run_pipeline() -> None:
                             "invalid": [r.model_dump() for r in all_invalid]
                         }, f)
                     
-                    # Incremental Save
-                    write_excel(all_valid, all_invalid, output_path=final_excel_path)
+                    # Incremental Save (passing only the new records to append)
+                    write_excel(valid, invalid, output_path=final_excel_path, append=True)
                     global _excel_output_path
                     _excel_output_path = final_excel_path
 
@@ -293,6 +299,9 @@ def _run_pipeline() -> None:
                 logger.error("Error processing %s:\n%s", drive_file.name, traceback.format_exc())
             finally:
                 tracker.file_done()
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
         # Run concurrent workers
         with ThreadPoolExecutor(max_workers=3) as executor:
@@ -300,9 +309,10 @@ def _run_pipeline() -> None:
 
         tracker.set_excel_url("/download")
 
-        # ── 3. Write Excel ───────────────────────────────────────────────────
-        tracker.log("📝 Writing Excel file…")
-        _excel_output_path = write_excel(all_valid, all_invalid)
+        # ── 3. Final Excel Polish ────────────────────────────────────────────
+        tracker.log("📝 Finalizing Excel file…")
+        # Write the full consolidated list one last time to ensure everything is sorted and styled
+        _excel_output_path = write_excel(all_valid, all_invalid, output_path=final_excel_path, append=True)
         tracker.log(f"✅ Excel saved → {_excel_output_path.name}")
 
         tracker.complete()

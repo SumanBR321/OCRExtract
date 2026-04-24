@@ -352,7 +352,11 @@ def _llm_fallback(
         return {}
 
     try:
-        client = Groq(api_key=settings.groq_api_key)
+        import httpx
+        # Pass a custom httpx client to bypass the 'proxies' vs 'proxy' 
+        # argument mismatch between older Groq SDKs and newer httpx versions.
+        custom_client = httpx.Client()
+        client = Groq(api_key=settings.groq_api_key, http_client=custom_client)
         
         context = f"""
         Known Metadata (from filename/folders):

@@ -92,6 +92,7 @@ def write_excel(
     valid_records: List[QuestionPaperRecord],
     invalid_records: List[QuestionPaperRecord],
     output_path: str | Path | None = None,
+    append: bool = True,
 ) -> Path:
     """
     Write all records to an Excel file.
@@ -101,6 +102,7 @@ def write_excel(
     valid_records   : list of validated QuestionPaperRecord objects
     invalid_records : list of records that failed validation
     output_path     : destination path; auto-generated if None
+    append          : if True, load existing data from the file and merge
 
     Returns
     -------
@@ -113,23 +115,45 @@ def write_excel(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Writing Excel → %s", output_path)
+    # 1. Load existing data if appending
+    existing_valid: List[dict] = []
+    existing_invalid: List[dict] = []
+    
+    if append and output_path.exists():
+        try:
+            logger.info("Loading existing data for merge from %s", output_path)
+            # We use openpyxl directly or pandas to read all sheets
+            all_sheets = pd.read_excel(output_path, sheet_name=None)
+            for sheet_name, df in all_sheets.items():
+                if sheet_name == "_Flagged":
+                    existing_invalid.extend(df.to_dict(orient="records"))
+                else:
+                    existing_valid.extend(df.to_dict(orient="records"))
+        except Exception as e:
+            logger.error("Could not load existing Excel for append: %s", e)
 
-    # Build a flat DataFrame
-    rows = [r.to_excel_row() for r in valid_records]
-    df_all = pd.DataFrame(rows, columns=COLUMNS) if rows else pd.DataFrame(columns=COLUMNS)
+    # 2. Convert current records to rows
+    new_valid_rows = [r.to_excel_row() for r in valid_records]
+    new_invalid_rows = [r.to_excel_row() | {"Flags": ", ".join(r.flags)} for r in invalid_records]
 
-    # Build flagged DataFrame
-    flagged_rows = [r.to_excel_row() | {"Flags": ", ".join(r.flags)} for r in invalid_records]
-    df_flagged = (
-        pd.DataFrame(flagged_rows, columns=COLUMNS + ["Flags"])
-        if flagged_rows
-        else pd.DataFrame(columns=COLUMNS + ["Flags"])
-    )
+    # 3. Merge and Deduplicate
+    # For valid records
+    df_all = pd.DataFrame(existing_valid + new_valid_rows, columns=COLUMNS)
+    if not df_all.empty:
+        # Deduplicate based on Course Code, Year, Month, SEM, and School
+        # This prevents the same paper from appearing multiple times if re-processed
+        df_all = df_all.drop_duplicates(subset=["Course Code", "Year", "Month", "SEM", "School", "Source File"], keep="last")
+    
+    # For invalid records
+    df_flagged = pd.DataFrame(existing_invalid + new_invalid_rows, columns=COLUMNS + ["Flags"])
+    if not df_flagged.empty:
+        df_flagged = df_flagged.drop_duplicates(subset=["Course Code", "Year", "Month", "SEM", "Source File"], keep="last")
 
-    # Group by school
+    logger.info("Writing Excel (Total: %d valid, %d flagged) → %s", len(df_all), len(df_flagged), output_path)
+
+    # 4. Group by school and write
     schools = sorted(df_all["School"].dropna().unique()) if not df_all.empty else []
-    if not schools:
+    if not schools and not df_all.empty:
         schools = ["All"]
         df_all["School"] = "All"
 
@@ -143,12 +167,12 @@ def write_excel(
         if not df_flagged.empty:
             df_flagged.to_excel(writer, sheet_name="_Flagged", index=False)
 
-    # Apply styling with openpyxl
+    # 5. Apply styling
     _style_workbook(output_path, schools)
 
     logger.info(
-        "Excel written: %d valid rows, %d flagged rows, %d sheets.",
-        len(valid_records), len(invalid_records), len(schools),
+        "Excel updated: %d total valid rows, %d sheets.",
+        len(df_all), len(schools),
     )
     return output_path
 

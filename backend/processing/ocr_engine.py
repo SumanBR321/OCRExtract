@@ -57,6 +57,10 @@ def run_ocr_on_images(images: List[Image.Image], tesseract_cmd: Optional[str] = 
                 text_parts = reader.readtext(img_np, detail=0)
                 results.append(" ".join(text_parts))
                 logger.debug("    Processed page %d/%d", i, len(images))
+                
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             
             return PAGE_SEPARATOR.join(results)
         except Exception as e:
