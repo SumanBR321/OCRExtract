@@ -61,6 +61,17 @@ class ProgressTracker:
         self.log(f"❌ ERROR: {message}")
         logger.error(message)
 
+    def set_excel_url(self, url: str) -> None:
+        with self._lock:
+            self._state.excel_url = url
+
+    def add_records(self, records: list[QuestionPaperRecord]) -> None:
+        """Add new records to the live preview list (keep last 10)."""
+        with self._lock:
+            # Convert to dict for JSON serialization
+            rows = [r.to_excel_row() for r in records]
+            self._state.recent_records = (rows + self._state.recent_records)[:10]
+
     def log(self, message: str) -> None:
         with self._lock:
             self._state.logs.append(message)

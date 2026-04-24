@@ -153,16 +153,35 @@ def _run_pipeline() -> None:
         pdf_files = list(drive.iter_pdfs(settings.drive_root_folder_id))
         total = len(pdf_files)
 
-        # Load checkpoints
+        # ── Checkpoints & Persistence ──────────────────────────────────────
         checkpoint_path = Path("output/processed_files.json")
+        backup_path     = Path("output/records_backup.json")
+        final_excel_path = Path("output/OCRExtract_Final_Results.xlsx")
+        
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        
         processed_set = set()
+        all_valid:   list = []
+        all_invalid: list = []
+
+        import json
+        # Load processed filenames
         if checkpoint_path.exists():
             try:
-                import json
                 with open(checkpoint_path, "r") as f:
                     processed_set = set(json.load(f))
-                tracker.log(f"🔄 Resuming: skipping {len(processed_set)} already processed files.")
             except: pass
+
+        # Load existing records to resume building the Excel
+        if backup_path.exists():
+            try:
+                with open(backup_path, "r") as f:
+                    data = json.load(f)
+                    all_valid   = [QuestionPaperRecord(**r) for r in data.get("valid", [])]
+                    all_invalid = [QuestionPaperRecord(**r) for r in data.get("invalid", [])]
+                tracker.log(f"🔄 Resumed: {len(processed_set)} files already done, {len(all_valid)} rows reloaded.")
+            except Exception as e:
+                logger.error(f"Failed to load backup: {e}")
 
         if total == 0:
             tracker.log("⚠️  No PDF files found in the specified Drive folder.")
@@ -171,9 +190,6 @@ def _run_pipeline() -> None:
 
         tracker.start(total)
         tracker.log(f"✅ Found {total} PDF file(s).")
-
-        all_valid:   list = []
-        all_invalid: list = []
 
         # ── 2. Process each PDF ─────────────────────────────────────────────
         for drive_file in pdf_files:
@@ -214,6 +230,8 @@ def _run_pipeline() -> None:
                     hint_school=drive_file.school,
                     hint_degree=drive_file.degree,
                     hint_semester=drive_file.semester,
+                    hint_month=drive_file.month,
+                    hint_year=drive_file.year,
                 )
 
                 # Clean
@@ -225,16 +243,22 @@ def _run_pipeline() -> None:
                 all_invalid.extend(invalid)
 
                 tracker.add_rows(len(valid))
+                tracker.add_records(valid) # Push to UI preview
                 tracker.log(
                     f"  ✅ Extracted {len(valid)} valid row(s), "
                     f"{len(invalid)} flagged."
                 )
 
-                # Mark as done in checkpoint
+                # Mark as done and Save Backup
                 processed_set.add(drive_file.name)
                 with open(checkpoint_path, "w") as f:
-                    import json
                     json.dump(list(processed_set), f)
+                
+                with open(backup_path, "w") as f:
+                    json.dump({
+                        "valid":   [r.model_dump() for r in all_valid],
+                        "invalid": [r.model_dump() for r in all_invalid]
+                    }, f)
 
             except Exception as exc:
                 msg = f"{drive_file.name}: {exc}"
@@ -243,10 +267,13 @@ def _run_pipeline() -> None:
             finally:
                 tracker.file_done()
 
-                # Incremental Save after EVERY file
+                # Incremental Save to the FIXED filename
                 if all_valid or all_invalid:
-                    _excel_output_path = write_excel(all_valid, all_invalid)
-                    tracker.log(f"🔄 Excel updated: {len(all_valid)} valid rows total.")
+                    write_excel(all_valid, all_invalid, output_path=final_excel_path)
+                    global _excel_output_path
+                    _excel_output_path = final_excel_path
+                    tracker.set_excel_url("/download")
+                    tracker.log(f"🔄 Excel updated: {len(all_valid)} rows total.")
 
         # ── 3. Write Excel ───────────────────────────────────────────────────
         tracker.log("📝 Writing Excel file…")

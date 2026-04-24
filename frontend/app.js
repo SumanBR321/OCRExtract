@@ -17,6 +17,9 @@ const POLL_INTERVAL = 2000;   // ms
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 const $start        = document.getElementById('btn-start');
+const $btnDownload    = document.getElementById('btn-download');
+const $btnStop        = document.getElementById('btn-stop');
+const $previewBody    = document.getElementById('preview-body');
 const $stop         = document.getElementById('btn-stop');
 const $download     = document.getElementById('btn-download');
 const $clearLogs    = document.getElementById('btn-clear-logs');
@@ -133,6 +136,14 @@ function applyStatus(data) {
     $currentFile.classList.remove('active');
   }
 
+  // Download button
+  if (data.excel_url) {
+    $btnDownload.href = data.excel_url;
+    $btnDownload.style.display = 'inline-flex';
+  } else {
+    $btnDownload.style.display = 'none';
+  }
+
   // Status dot & label
   $statusDot.className = 'status-dot';
   if (data.is_running) {
@@ -146,6 +157,20 @@ function applyStatus(data) {
     $statusLabel.textContent = 'Errors';
   } else {
     $statusLabel.textContent = 'Idle';
+  }
+
+  // Live Preview Table
+  if (data.recent_records && data.recent_records.length > 0) {
+    $previewBody.innerHTML = data.recent_records.map(row => `
+      <tr>
+        <td>${row['Course Code'] || '—'}</td>
+        <td>${row['Course Title'] || '—'}</td>
+        <td>${row['SEM'] || '—'}</td>
+        <td>${row['Year'] || '—'}</td>
+      </tr>
+    `).join('');
+  } else if (!data.is_running && !data.is_complete) {
+    $previewBody.innerHTML = '<tr class="empty-row"><td colspan="4">Waiting for data...</td></tr>';
   }
 
   // New log lines (only append deltas)

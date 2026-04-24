@@ -114,6 +114,8 @@ class ProcessingStatus(BaseModel):
     current_file:   Optional[str] = None
     extracted_rows: int = 0
     errors:         int = 0
+    excel_url:      Optional[str] = None
+    recent_records: list[dict] = Field(default_factory=list)
     logs:           list[str] = Field(default_factory=list)
     is_running:     bool = False
     is_complete:    bool = False

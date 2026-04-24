@@ -81,6 +81,8 @@ def extract_records(
     hint_school: str = "",
     hint_degree: str = "",
     hint_semester: str = "",
+    hint_month: str = "",
+    hint_year: str = "",
 ) -> List[QuestionPaperRecord]:
     """
     Parse *raw_text* (combined OCR output) into one or more records.
@@ -94,14 +96,26 @@ def extract_records(
 
     records: List[QuestionPaperRecord] = []
     for section in sections:
-        record = _extract_one(
-            section,
-            source_file=source_file,
-            hint_school=hint_school,
-            hint_degree=hint_degree,
-            hint_semester=hint_semester,
-        )
-        records.append(record)
+        try:
+            record = _extract_one(
+                section,
+                source_file=source_file,
+                hint_school=hint_school,
+                hint_degree=hint_degree,
+                hint_semester=hint_semester,
+                hint_month=hint_month,
+                hint_year=hint_year,
+            )
+            records.append(record)
+        except Exception as exc:
+            logger.warning(f"Failed to extract record from section in {source_file}: {exc}")
+            # Add a dummy record with flags so we don't lose the data
+            records.append(QuestionPaperRecord(
+                source_file=source_file,
+                school=hint_school,
+                degree=hint_degree,
+                flags=["extraction_error", str(exc)]
+            ))
 
     return records
 
@@ -134,6 +148,8 @@ def _extract_one(
     hint_school: str,
     hint_degree: str,
     hint_semester: str,
+    hint_month: str,
+    hint_year: str,
 ) -> QuestionPaperRecord:
     """Extract a single record from one paper section."""
     flags: list[str] = []
@@ -146,32 +162,39 @@ def _extract_one(
         flags.append("missing_course_code")
         confidence = ConfidenceLevel.LOW
 
-    # -- Year (Only look in the top 1000 characters - the header) --
-    header_text = text[:1000]
-    year_matches = RE_YEAR.findall(header_text)
-    year = int(year_matches[0]) if year_matches else None
+    # -- Year --
+    # Prioritize filename hint as ground truth, fallback to regex
+    year = int(hint_year) if (hint_year and hint_year.isdigit()) else None
+    if not year:
+        header_text = text[:1000]
+        year_matches = RE_YEAR.findall(header_text)
+        year = int(year_matches[0]) if year_matches else None
     
     if not year:
         flags.append("missing_year")
         confidence = ConfidenceLevel.LOW
 
     # -- Month --
-    month = _extract_month(text)
+    # Prioritize filename hint as ground truth
+    month = _normalise_month_name(hint_month) if hint_month else None
+    if not month:
+        month = _extract_month(text)
+
     if not month:
         flags.append("missing_month")
         if confidence == ConfidenceLevel.HIGH:
             confidence = ConfidenceLevel.MEDIUM
 
     # -- Semester --
-    sem_match = RE_SEMESTER.search(text)
-    if not sem_match:
-        sem_match = RE_SEMESTER_WORDS.search(text)
+    # Prioritize hint_semester or filename parse
+    semester = hint_semester or _parse_sem_from_filename(source_file)
     
-    semester = sem_match.group(1).upper() if sem_match else None
-    
-    # Fallback to hint or filename for semester
+    # Fallback to OCR only if filename hints are missing
     if not semester:
-        semester = hint_semester or _parse_sem_from_filename(source_file)
+        sem_match = RE_SEMESTER.search(text)
+        if not sem_match:
+            sem_match = RE_SEMESTER_WORDS.search(text)
+        semester = sem_match.group(1).upper() if sem_match else None
     
     if not semester:
         flags.append("missing_semester")
@@ -186,7 +209,12 @@ def _extract_one(
 
     # -- LLM fallback if any major fields are missing --
     if not (course_code and course_title and year and semester):
-        llm_data = _llm_fallback(text)
+        llm_data = _llm_fallback(
+            text,
+            hint_year=year,
+            hint_month=month,
+            hint_sem=semester
+        )
         if llm_data:
             course_code  = course_code  or llm_data.get("course_code")
             course_title = course_title or llm_data.get("course_title")
@@ -236,6 +264,18 @@ def _extract_month(text: str) -> str | None:
             logger.debug("Fuzzy month: '%s' → '%s' (score=%d)", token, result[0], result[1])
             return result[0]
 
+    return None
+
+
+def _normalise_month_name(raw: str) -> str | None:
+    """Convert 'DEC' or 'december' to 'December'."""
+    raw = raw.strip().capitalize()
+    if raw in MONTH_ORDER:
+        return raw
+    # Check abbreviations
+    for full in MONTH_ORDER.keys():
+        if raw.startswith(full[:3]):
+            return full
     return None
 
 
@@ -294,7 +334,12 @@ def _heuristic_title_search(text: str) -> str | None:
 # LLM fallback stub
 # ---------------------------------------------------------------------------
 
-def _llm_fallback(text: str) -> dict:
+def _llm_fallback(
+    text: str,
+    hint_year: int | None = None,
+    hint_month: str | None = None,
+    hint_sem: str | None = None,
+) -> dict:
     """
     Call Groq API to extract structured data from OCR text.
     """
@@ -304,10 +349,26 @@ def _llm_fallback(text: str) -> dict:
     try:
         client = Groq(api_key=settings.groq_api_key)
         
+        context = f"""
+        Known Metadata (from filename/folders):
+        - Year: {hint_year or "Unknown"}
+        - Month: {hint_month or "Unknown"}
+        - Semester: {hint_sem or "Unknown"}
+        """
+
         prompt = f"""
         Extract exam paper metadata from the following OCR text.
+        
+        {context}
+        
+        Rules:
+        - "year" MUST be a 4-digit number.
+        - "month" should be the full name (e.g., "January").
+        - "semester" should be Roman (III) or short (3rd).
+        - If the "Known Metadata" above is provided, use it to guide your search but prioritize finding the actual Course Code and Course Title.
+        
         Return ONLY a JSON object with these keys: 
-        "course_code", "course_title", "year" (int), "month", "semester" (e.g. "III" or "3rd").
+        "course_code", "course_title", "year", "month", "semester".
         
         Text:
         {text[:4000]}

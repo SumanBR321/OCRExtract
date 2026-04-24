@@ -100,17 +100,42 @@
         <span class="current-file-name" id="current-file">—</span>
       </div>
 
-      <!-- Logs -->
-      <div class="logs-section" role="region" aria-label="Processing logs">
-        <div class="logs-header">
-          <div class="logs-header-left">
-            <div class="logs-dot" id="logs-dot"></div>
-            Live Logs
+      <!-- Logs Section -->
+      <section class="card logs-card">
+        <div class="card-header">
+          <div class="header-with-dot">
+            <div class="status-dot" id="logs-dot"></div>
+            <h2>Process Logs</h2>
           </div>
-          <button id="btn-clear-logs" aria-label="Clear log output">Clear</button>
+          <button id="btn-clear-logs" class="btn btn-ghost btn-sm">Clear</button>
         </div>
-        <div id="logs-container" aria-live="polite" aria-atomic="false"></div>
-      </div>
+        <div id="logs-container" class="logs-container">
+          <div class="log-entry system">Ready to process.</div>
+        </div>
+      </section>
+
+      <!-- Live Preview Section -->
+      <section class="card preview-card">
+        <div class="card-header">
+          <h2>Live Extraction Preview</h2>
+          <span class="badge">Last 10 Rows</span>
+        </div>
+        <div class="table-container">
+          <table id="preview-table">
+            <thead>
+              <tr>
+                <th>Course Code</th>
+                <th>Course Title</th>
+                <th>SEM</th>
+                <th>Year</th>
+              </tr>
+            </thead>
+            <tbody id="preview-body">
+              <tr class="empty-row"><td colspan="4">Waiting for data...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
 
     </div><!-- /.container -->
   </main>

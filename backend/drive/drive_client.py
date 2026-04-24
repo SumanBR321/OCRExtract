@@ -32,7 +32,7 @@ SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 class DriveFile:
     """Lightweight descriptor for a Drive PDF file."""
 
-    __slots__ = ("file_id", "name", "school", "degree", "semester", "local_path")
+    __slots__ = ("file_id", "name", "school", "degree", "semester", "month", "year", "local_path")
 
     def __init__(
         self,
@@ -41,6 +41,8 @@ class DriveFile:
         school: str = "",
         degree: str = "",
         semester: str = "",
+        month: str = "",
+        year: str = "",
         local_path: Path | None = None,
     ) -> None:
         self.file_id    = file_id
@@ -48,12 +50,15 @@ class DriveFile:
         self.school     = school
         self.degree     = degree
         self.semester   = semester
+        self.month      = month
+        self.year       = year
         self.local_path = local_path
 
     def __repr__(self) -> str:
         return (
             f"<DriveFile {self.name!r} school={self.school!r} "
-            f"degree={self.degree!r} sem={self.semester!r}>"
+            f"degree={self.degree!r} sem={self.semester!r} "
+            f"month={self.month!r} year={self.year!r}>"
         )
 
 
@@ -157,12 +162,32 @@ class DriveClient:
                         yield from _walk(fid, depth + 1, school, degree, semester)
 
                 elif mime == "application/pdf" or name.lower().endswith(".pdf"):
+                    # Attempt to parse metadata from filename
+                    # Format: SOB-III-SEM-DEC-2022-BBA.pdf
+                    f_school, f_sem, f_month, f_year, f_degree = school, semester, "", "", degree
+                    
+                    # Split by dash and remove .pdf
+                    parts = name.rsplit(".", 1)[0].split("-")
+                    if len(parts) >= 5:
+                        # Try to match the pattern: SCHOOL-SEM-SEM-MONTH-YEAR-DEGREE
+                        # Example: SOB-III-SEM-DEC-2022-BBA.pdf (6 parts)
+                        # Example: SOB-III-SEM-DEC-2022.pdf (5 parts)
+                        f_school = parts[0]
+                        f_sem    = parts[1]
+                        # parts[2] is usually "SEM"
+                        f_month  = parts[3]
+                        f_year   = parts[4]
+                        if len(parts) >= 6:
+                            f_degree = parts[5]
+
                     yield DriveFile(
                         file_id=fid,
                         name=name,
-                        school=school,
-                        degree=degree,
-                        semester=semester,
+                        school=f_school,
+                        degree=f_degree,
+                        semester=f_sem,
+                        month=f_month,
+                        year=f_year,
                     )
 
         yield from _walk(root_folder_id, 0, "", "", "")
