@@ -203,9 +203,10 @@ def _extract_one(
     title_match = RE_COURSE_TITLE.search(text)
     course_title = _clean_title(title_match.group(1)) if title_match else None
     
-    # Heuristic fallback for Title: look for prominent lines before split keywords
-    if not course_title:
-        course_title = _heuristic_title_search(text)
+    # Heuristic fallback for Title is DISABLED because it often mistakenly grabs exam questions.
+    # We will let the Groq LLM cleanly extract the title instead.
+    # if not course_title:
+    #     course_title = _heuristic_title_search(text)
 
     # -- LLM fallback if any major fields are missing --
     if not (course_code and course_title and year and semester):
@@ -374,24 +375,41 @@ def _llm_fallback(
         - "year" MUST be a 4-digit number.
         - "month" should be the full name (e.g., "January").
         - "semester" should be Roman (III) or short (3rd).
-        - If the "Known Metadata" above is provided, use it to guide your search but prioritize finding the actual Course Code and Course Title.
+        - "course_title" MUST be the concise subject name (e.g. "Data Structures", "Macroeconomics"). NEVER include exam instructions, questions, long paragraphs, or marks. If you cannot find a valid concise subject name, return null for "course_title". Also understand the questions to find the Course Title only when its confusing you. It will usually be just above or below the course code. 
+        - "course_code" MUST be a short alphanumeric string like "CS2401", "BCA301".
         
         Return ONLY a JSON object with these keys: 
         "course_code", "course_title", "year", "month", "semester".
         
         Text:
-        {text[:4000]}
+        {text[:1500]}
         """
         
-        completion = client.chat.completions.create(
-            model=settings.groq_model,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=0.1,
-        )
-        
-        import json
-        return json.loads(completion.choices[0].message.content)
+        import time
+        for attempt in range(3):
+            try:
+                completion = client.chat.completions.create(
+                    model=settings.groq_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"},
+                    temperature=0.1,
+                )
+                
+                import json
+                return json.loads(completion.choices[0].message.content)
+            except Exception as e:
+                err_msg = str(e)
+                if "429" in err_msg or "Rate limit" in err_msg:
+                    # Stagger the wait times to allow token bucket to refill
+                    wait_time = 15 * (attempt + 1)
+                    logger.warning(f"Groq rate limit hit. Waiting {wait_time}s before retry {attempt+1}/3...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"Groq extraction failed: {err_msg}")
+                    return {}
+                    
+        logger.error("Groq extraction failed after 3 retries due to rate limits.")
+        return {}
     except Exception as e:
         logger.error(f"Groq extraction failed: {str(e)}")
         return {}
