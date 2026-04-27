@@ -42,23 +42,26 @@ def pdf_to_images(pdf_path: str | Path, dpi: int = DEFAULT_DPI) -> List[Image.Im
     RuntimeError
         If conversion fails (e.g. Poppler not installed).
     """
-    import pypdfium2 as pdfium
+    from pdf2image import convert_from_path
     
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
-    logger.info("Converting '%s' → images @ %d DPI (using pypdfium2) …", pdf_path.name, dpi)
+    logger.info("Converting '%s' → images @ %d DPI (using pdf2image) …", pdf_path.name, dpi)
 
     try:
-        pdf = pdfium.PdfDocument(str(pdf_path))
-        images = []
-        # scale = DPI / 72 (default PDF resolution)
-        scale = dpi / 72
-        for page in pdf:
-            bitmap = page.render(scale=scale)
-            images.append(bitmap.to_pil())
+        # Use poppler_path from settings if configured
+        poppler_path = settings.poppler_path
+        
+        images = convert_from_path(
+            str(pdf_path),
+            dpi=dpi,
+            poppler_path=poppler_path,
+            thread_count=4  # Speed up conversion using multiple threads
+        )
     except Exception as exc:
+        logger.error(f"pdf2image failed: {exc}")
         raise RuntimeError(f"Could not read PDF '{pdf_path.name}': {exc}") from exc
 
     logger.info("  → %d page(s) extracted from '%s'", len(images), pdf_path.name)

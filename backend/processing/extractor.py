@@ -11,8 +11,11 @@ Strategy (in priority order):
 from __future__ import annotations
 
 import re
+import json
+import time
 from typing import List
 
+import httpx
 from rapidfuzz import process as fuzz_process
 from groq import Groq
 
@@ -340,6 +343,58 @@ def _heuristic_title_search(text: str) -> str | None:
 # LLM fallback stub
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# LLM fallback with token chunking
+# ---------------------------------------------------------------------------
+
+def _count_tokens(text: str) -> int:
+    """
+    Approximate token count. 
+    Rule of thumb: 1 token ~= 4 characters for English text.
+    We'll use a slightly more conservative 3.5 to be safe.
+    """
+    return int(len(text) / 3.5)
+
+def _chunk_text(text: str, max_tokens: int = 5500) -> List[str]:
+    """
+    Split text into chunks that are approximately within the token limit.
+    Tries to split at line boundaries.
+    """
+    max_chars = int(max_tokens * 3.5)
+    if len(text) <= max_chars:
+        return [text]
+    
+    chunks = []
+    lines = text.splitlines()
+    current_chunk = []
+    current_chars = 0
+    
+    for line in lines:
+        # If a single line is longer than max_chars, we have to split it anyway
+        if len(line) > max_chars:
+            # Flush current chunk if any
+            if current_chunk:
+                chunks.append("\n".join(current_chunk))
+                current_chunk = []
+                current_chars = 0
+            # Split the long line into pieces
+            for i in range(0, len(line), max_chars):
+                chunks.append(line[i:i+max_chars])
+            continue
+
+        if current_chars + len(line) + 1 > max_chars:
+            chunks.append("\n".join(current_chunk))
+            current_chunk = [line]
+            current_chars = len(line) + 1
+        else:
+            current_chunk.append(line)
+            current_chars += len(line) + 1
+            
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+        
+    return chunks
+
 def _llm_fallback(
     text: str,
     hint_year: int | None = None,
@@ -348,68 +403,114 @@ def _llm_fallback(
 ) -> dict:
     """
     Call Groq API to extract structured data from OCR text.
+    Handles large texts by chunking into < 6000 tokens.
     """
     if not settings.groq_api_key:
         return {}
 
+    # Final merged data
+    merged_data = {
+        "course_code": None,
+        "course_title": None,
+        "year": hint_year,
+        "month": hint_month,
+        "semester": hint_sem
+    }
+
+    # Split text into chunks of ~5500 tokens to stay well under the 6000 limit
+    chunks = _chunk_text(text, max_tokens=5500)
+    logger.info(f"Processing LLM fallback in {len(chunks)} chunk(s).")
+
     try:
-        import httpx
-        # Pass a custom httpx client to bypass the 'proxies' vs 'proxy' 
-        # argument mismatch between older Groq SDKs and newer httpx versions.
         custom_client = httpx.Client()
         client = Groq(api_key=settings.groq_api_key, http_client=custom_client)
         
-        context = f"""
-        Known Metadata (from filename/folders):
-        - Year: {hint_year or "Unknown"}
-        - Month: {hint_month or "Unknown"}
-        - Semester: {hint_sem or "Unknown"}
-        """
-
-        prompt = f"""
-        Extract exam paper metadata from the following OCR text.
-        
-        {context}
-        
-        Rules:
-        - "year" MUST be a 4-digit number.
-        - "month" should be the full name (e.g., "January").
-        - "semester" should be Roman (III) or short (3rd).
-        - "course_title" MUST be the concise subject name (e.g. "Data Structures", "Macroeconomics"). NEVER include exam instructions, questions, long paragraphs, or marks. If you cannot find a valid concise subject name, return null for "course_title". Also understand the questions to find the Course Title only when its confusing you. It will usually be just above or below the course code. 
-        - "course_code" MUST be a short alphanumeric string like "CS2401", "BCA301".
-        
-        Return ONLY a JSON object with these keys: 
-        "course_code", "course_title", "year", "month", "semester".
-        
-        Text:
-        {text[:1500]}
-        """
-        
-        import time
-        for attempt in range(3):
-            try:
-                completion = client.chat.completions.create(
-                    model=settings.groq_model,
-                    messages=[{"role": "user", "content": prompt}],
-                    response_format={"type": "json_object"},
-                    temperature=0.1,
-                )
+        # We only process up to 3 chunks to avoid excessive costs/time, 
+        # as metadata is almost always in the first few pages.
+        for i, chunk in enumerate(chunks[:3]):
+            if i > 0:
+                # Small sleep between chunks to avoid bursting rate limits
+                time.sleep(2)
                 
-                import json
-                return json.loads(completion.choices[0].message.content)
-            except Exception as e:
-                err_msg = str(e)
-                if "429" in err_msg or "Rate limit" in err_msg:
-                    # Stagger the wait times to allow token bucket to refill
-                    wait_time = 15 * (attempt + 1)
-                    logger.warning(f"Groq rate limit hit. Waiting {wait_time}s before retry {attempt+1}/3...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"Groq extraction failed: {err_msg}")
-                    return {}
+            context = f"""
+            Chunk {i+1} of {len(chunks)}
+            Known Metadata:
+            - Year: {merged_data['year'] or "Unknown"}
+            - Month: {merged_data['month'] or "Unknown"}
+            - Semester: {merged_data['semester'] or "Unknown"}
+            """
+
+            prompt = f"""
+            Extract exam paper metadata from the following OCR text chunk.
+            
+            {context}
+            
+            Strict Extraction Rules:
+            1. "course_code": Concise alphanumeric code (e.g., "CS2401"). No spaces.
+            2. "course_title": The SUBJECT NAME only. 
+               - CRITICAL: Never include exam instructions (e.g., "Time: 3 hrs", "Max Marks", "Note:").
+               - CRITICAL: Never include parts of questions.
+               - CLEAN: Remove OCR noise like extra symbols or leading numbers.
+            3. "year": 4-digit number.
+            4. "month": Canonical month name (e.g., "December").
+            5. "semester": Roman numeral or simple ordinal (e.g., "III", "3rd").
+            6. "Logic Check": If the text contains multiple papers, only extract the one relevant to this chunk's header.
+            
+            Return ONLY a JSON object:
+            {{"course_code": "...", "course_title": "...", "year": ..., "month": "...", "semester": "..."}}
+            Use null for any field that is missing or unclear.
+            
+            Text:
+            {chunk}
+            """
+            
+            chunk_extracted = {}
+            for attempt in range(3):
+                try:
+                    completion = client.chat.completions.create(
+                        model=settings.groq_model,
+                        messages=[{"role": "user", "content": prompt}],
+                        response_format={"type": "json_object"},
+                        temperature=0.1,
+                    )
+                    chunk_extracted = json.loads(completion.choices[0].message.content)
+                    break
+                except Exception as e:
+                    err_msg = str(e)
+                    if "429" in err_msg or "Rate limit" in err_msg:
+                        wait_time = 15 * (attempt + 1)
+                        logger.warning(f"Groq rate limit hit for chunk {i+1}. Waiting {wait_time}s...")
+                        time.sleep(wait_time)
+                    else:
+                        logger.error(f"Groq chunk {i+1} failed: {err_msg}")
+                        break
+            
+            # Merge extracted data
+            if chunk_extracted:
+                for key in ["course_code", "course_title", "year", "month", "semester"]:
+                    val = chunk_extracted.get(key)
+                    if not val or val == "null":
+                        continue
+                        
+                    # Basic cleaning for strings
+                    if isinstance(val, str):
+                        val = val.strip()
+                        if key == "course_code":
+                            val = re.sub(r"\s+", "", val).upper()
+                        elif key == "course_title":
+                            # Secondary check to strip instructions if LLM included them
+                            val = re.sub(r"(?i)(Time|Max|Min|Note|Instruction).*[:\-].*", "", val).strip()
                     
-        logger.error("Groq extraction failed after 3 retries due to rate limits.")
-        return {}
+                    # Only update if we don't already have a value for this field
+                    if merged_data[key] is None:
+                        merged_data[key] = val
+            
+            # Optimization: If we have core metadata, stop processing chunks
+            if merged_data["course_code"] and merged_data["course_title"] and merged_data["year"]:
+                break
+
+        return merged_data
+
     except Exception as e:
-        logger.error(f"Groq extraction failed: {str(e)}")
-        return {}
+        logger.error(f"Groq extraction process failed: {str(e)}")
+        return merged_data
